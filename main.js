@@ -66,6 +66,20 @@ const DEFAULT_SETTINGS = {
 	customTasks: [],     // user-defined tasks [{name, prompt}]
 };
 
+// ── System prompt ───────────────────────────────────────────────────────────
+
+const SYSTEM_PROMPT = [
+	"You are an assistant integrated into Obsidian, a markdown-based knowledge management app.",
+	"The user is working on a note in their Obsidian vault. They will give you the note's content and a task to perform.",
+	"",
+	"Important guidelines:",
+	"- Your output will be used to directly modify or replace the user's note, so respond with the final content only — no wrapping explanation unless the task explicitly asks for commentary.",
+	"- Preserve the note's existing markdown formatting (headings, lists, links, tags, frontmatter, etc.) unless the task requires changing it.",
+	"- Obsidian uses [[wikilinks]] and #tags — keep these intact.",
+	"- If the user selected only part of the note, your response replaces just that selection.",
+	"- Be concise. Do not add preamble like \"Here is the revised note:\" — just return the content.",
+].join("\n");
+
 const MODELS = [
 	{ value: "",                            label: "Default (CLI default)" },
 	{ value: "claude-opus-4-6",             label: "Claude Opus 4.6" },
@@ -140,7 +154,7 @@ function resolvePath(claudePath) {
 	return detected;
 }
 
-function runClaude(claudePath, model, prompt, cwd) {
+function runClaude(claudePath, model, systemPrompt, prompt, cwd) {
 	return new Promise((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
@@ -152,7 +166,13 @@ function runClaude(claudePath, model, prompt, cwd) {
 			return reject(err);
 		}
 
-		const args = ["-p", "--output-format", "text", "--tools", "", "--strict-mcp-config"];
+		const args = [
+			"-p",
+			"--output-format", "text",
+			"--tools", "",
+			"--strict-mcp-config",
+			"--system-prompt", systemPrompt,
+		];
 		if (model) args.push("--model", model);
 
 		const proc = spawn(resolved, args, {
@@ -536,9 +556,17 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 		}
 
 		const filePath = ctx.file ? ctx.file.path : "unknown";
-		const fileHeader = `File: ${filePath}\nVault: ${this.app.vault.getName()}\n\n`;
-		const fullPrompt = fileHeader + promptPrefix + ctx.content;
+		const vaultName = this.app.vault.getName();
 		const vaultPath = this.app.vault.adapter.basePath;
+
+		const systemPrompt = SYSTEM_PROMPT
+			+ `\n\nCurrent file: ${filePath}`
+			+ `\nVault: ${vaultName}`
+			+ (ctx.isSelection ? "\nThe user has selected a portion of the note. Your output replaces the selection only." : "");
+
+		const fullPrompt = `Task: ${promptPrefix}`
+			+ `\n---\n${ctx.isSelection ? "Selected text" : "Full note content"}:\n\n`
+			+ ctx.content;
 
 		// Decide how to output
 		const mode = this.settings.outputMode;
@@ -548,7 +576,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			modal.open();
 
 			try {
-				const result = await runClaude(this.settings.claudePath, this.settings.model, fullPrompt, vaultPath);
+				const result = await runClaude(this.settings.claudePath, this.settings.model, systemPrompt, fullPrompt, vaultPath);
 				modal.setContent(result);
 			} catch (err) {
 				modal.setError(err.message);
@@ -557,7 +585,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			new obsidian.Notice(`Running Claude: ${taskName}…`);
 
 			try {
-				const result = await runClaude(this.settings.claudePath, this.settings.model, fullPrompt, vaultPath);
+				const result = await runClaude(this.settings.claudePath, this.settings.model, systemPrompt, fullPrompt, vaultPath);
 
 				if (mode === "replace-selection" && ctx.isSelection) {
 					ctx.editor.replaceSelection(result);
