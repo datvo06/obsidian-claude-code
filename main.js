@@ -6,13 +6,61 @@
  */
 
 const obsidian = require("obsidian");
-const { spawn } = require("child_process");
+const { spawn, execSync } = require("child_process");
 const path = require("path");
+const fs = require("fs");
+
+// ── Auto-detect claude binary ───────────────────────────────────────────────
+
+function findClaudeBinary() {
+	const home = process.env.HOME || "";
+
+	// Common install locations
+	const candidates = [
+		path.join(home, ".local", "bin", "claude"),
+		path.join(home, ".claude", "bin", "claude"),
+		path.join(home, ".nvm", "versions", "node"),  // handled below
+		"/usr/local/bin/claude",
+		"/opt/homebrew/bin/claude",
+		"/usr/bin/claude",
+	];
+
+	// Check straightforward paths first
+	for (const p of candidates) {
+		try {
+			if (fs.existsSync(p) && fs.statSync(p).isFile()) return p;
+		} catch (_) { /* skip */ }
+	}
+
+	// Check nvm — walk active node version's bin
+	const nvmDir = path.join(home, ".nvm", "versions", "node");
+	try {
+		if (fs.existsSync(nvmDir)) {
+			const versions = fs.readdirSync(nvmDir).sort().reverse();
+			for (const v of versions) {
+				const p = path.join(nvmDir, v, "bin", "claude");
+				if (fs.existsSync(p)) return p;
+			}
+		}
+	} catch (_) { /* skip */ }
+
+	// Last resort: ask a login shell (slower but handles custom setups)
+	try {
+		const shell = process.env.SHELL || "/bin/zsh";
+		const result = execSync(`${shell} -ilc "which claude" 2>/dev/null`, {
+			timeout: 5000,
+			encoding: "utf-8",
+		}).trim();
+		if (result && fs.existsSync(result)) return result;
+	} catch (_) { /* skip */ }
+
+	return null;
+}
 
 // ── Default settings ────────────────────────────────────────────────────────
 
 const DEFAULT_SETTINGS = {
-	claudePath: "claude",
+	claudePath: "",      // empty = auto-detect
 	outputMode: "modal", // "modal" | "append" | "replace-selection"
 	customTasks: [],     // user-defined tasks [{name, prompt}]
 };
@@ -70,18 +118,35 @@ function getActiveFileContent(app) {
 
 // ── Claude runner ───────────────────────────────────────────────────────────
 
+function resolvePath(claudePath) {
+	if (claudePath && claudePath.trim()) {
+		return claudePath.replace(/^~/, process.env.HOME || "");
+	}
+	const detected = findClaudeBinary();
+	if (!detected) {
+		throw new Error(
+			"Could not find claude CLI. Install it with: npm install -g @anthropic-ai/claude-code\n" +
+			"Or set the path manually in Settings → Claude Code."
+		);
+	}
+	return detected;
+}
+
 function runClaude(claudePath, prompt, cwd) {
 	return new Promise((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
 
-		// Resolve ~ in path
-		const resolved = claudePath.replace(/^~/, process.env.HOME || "");
+		let resolved;
+		try {
+			resolved = resolvePath(claudePath);
+		} catch (err) {
+			return reject(err);
+		}
 
 		const proc = spawn(resolved, ["-p", "--output-format", "text"], {
 			cwd,
 			env: { ...process.env, NO_COLOR: "1" },
-			shell: true,
 		});
 
 		proc.stdin.write(prompt);
@@ -208,15 +273,20 @@ class ClaudeCodeSettingTab extends obsidian.PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "Claude Code Settings" });
 
+		const detected = findClaudeBinary();
 		new obsidian.Setting(containerEl)
 			.setName("Claude CLI path")
-			.setDesc("Path to the claude executable. Use 'claude' if it's in your PATH.")
+			.setDesc(
+				detected
+					? `Leave empty to auto-detect. Found: ${detected}`
+					: "Auto-detect failed — please enter the full path to claude."
+			)
 			.addText((text) =>
 				text
-					.setPlaceholder("claude")
+					.setPlaceholder(detected || "/path/to/claude")
 					.setValue(this.plugin.settings.claudePath)
 					.onChange(async (value) => {
-						this.plugin.settings.claudePath = value || "claude";
+						this.plugin.settings.claudePath = value;
 						await this.plugin.saveSettings();
 					})
 			);
