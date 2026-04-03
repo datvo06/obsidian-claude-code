@@ -63,6 +63,7 @@ const DEFAULT_SETTINGS = {
 	claudePath: "",      // empty = auto-detect
 	model: "",           // empty = CLI default
 	outputMode: "modal", // "modal" | "append" | "replace-selection"
+	agentMode: "off",    // "off" | "tools" | "full"
 	customTasks: [],     // user-defined tasks [{name, prompt}]
 };
 
@@ -154,7 +155,7 @@ function resolvePath(claudePath) {
 	return detected;
 }
 
-function runClaude(claudePath, model, systemPrompt, prompt, cwd) {
+function runClaude(claudePath, model, systemPrompt, prompt, cwd, agentMode) {
 	return new Promise((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
@@ -169,10 +170,20 @@ function runClaude(claudePath, model, systemPrompt, prompt, cwd) {
 		const args = [
 			"-p",
 			"--output-format", "text",
-			"--tools", "",
-			"--strict-mcp-config",
 			"--system-prompt", systemPrompt,
 		];
+
+		if (agentMode === "full") {
+			// Full agent: all tools, skip permission prompts
+			args.push("--dangerously-skip-permissions");
+		} else if (agentMode === "tools") {
+			// Tools enabled but permissions still required
+			// (user confirms each action in the terminal)
+		} else {
+			// Text-only: no tools, no MCP
+			args.push("--tools", "", "--strict-mcp-config");
+		}
+
 		if (model) args.push("--model", model);
 
 		const proc = spawn(resolved, args, {
@@ -367,6 +378,21 @@ class ClaudeCodeSettingTab extends obsidian.PluginSettingTab {
 			});
 
 		new obsidian.Setting(containerEl)
+			.setName("Agent mode")
+			.setDesc("Controls whether Claude can read/edit files in your vault directly.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("off", "Off — text response only")
+					.addOption("tools", "Tools enabled — asks permission for each action")
+					.addOption("full", "Full agent — skip all permission prompts")
+					.setValue(this.plugin.settings.agentMode)
+					.onChange(async (value) => {
+						this.plugin.settings.agentMode = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new obsidian.Setting(containerEl)
 			.setName("Output mode")
 			.setDesc("Where to show Claude's response.")
 			.addDropdown((dropdown) =>
@@ -559,10 +585,15 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 		const vaultName = this.app.vault.getName();
 		const vaultPath = this.app.vault.adapter.basePath;
 
+		const agentic = this.settings.agentMode !== "off";
 		const systemPrompt = SYSTEM_PROMPT
 			+ `\n\nCurrent file: ${filePath}`
 			+ `\nVault: ${vaultName}`
-			+ (ctx.isSelection ? "\nThe user has selected a portion of the note. Your output replaces the selection only." : "");
+			+ `\nVault path on disk: ${vaultPath}`
+			+ (ctx.isSelection ? "\nThe user has selected a portion of the note. Your output replaces the selection only." : "")
+			+ (agentic
+				? "\n\nYou have file editing tools available. You may read and edit files directly in the vault when the task requires it. The vault root is the working directory."
+				: "");
 
 		const fullPrompt = `Task: ${promptPrefix}`
 			+ `\n---\n${ctx.isSelection ? "Selected text" : "Full note content"}:\n\n`
@@ -576,7 +607,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			modal.open();
 
 			try {
-				const result = await runClaude(this.settings.claudePath, this.settings.model, systemPrompt, fullPrompt, vaultPath);
+				const result = await runClaude(this.settings.claudePath, this.settings.model, systemPrompt, fullPrompt, vaultPath, this.settings.agentMode);
 				modal.setContent(result);
 			} catch (err) {
 				modal.setError(err.message);
@@ -585,7 +616,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			new obsidian.Notice(`Running Claude: ${taskName}…`);
 
 			try {
-				const result = await runClaude(this.settings.claudePath, this.settings.model, systemPrompt, fullPrompt, vaultPath);
+				const result = await runClaude(this.settings.claudePath, this.settings.model, systemPrompt, fullPrompt, vaultPath, this.settings.agentMode);
 
 				if (mode === "replace-selection" && ctx.isSelection) {
 					ctx.editor.replaceSelection(result);
