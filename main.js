@@ -170,9 +170,10 @@ function runClaude(claudePath, prompt, cwd) {
 // ── Output modal ────────────────────────────────────────────────────────────
 
 class ClaudeOutputModal extends obsidian.Modal {
-	constructor(app, title) {
+	constructor(app, title, ctx) {
 		super(app);
 		this.title = title;
+		this.ctx = ctx; // { editor, isSelection, file }
 		this.result = "";
 	}
 
@@ -190,13 +191,43 @@ class ClaudeOutputModal extends obsidian.Modal {
 		this.outputEl.empty();
 		obsidian.MarkdownRenderer.render(this.app, text, this.outputEl, "", null);
 
-		// Copy button
 		const actions = this.contentEl.createDiv({ cls: "claude-code-actions" });
-		const copyBtn = actions.createEl("button", { text: "Copy to clipboard" });
+
+		// Copy
+		const copyBtn = actions.createEl("button", { text: "Copy" });
 		copyBtn.addEventListener("click", () => {
 			navigator.clipboard.writeText(this.result);
 			new obsidian.Notice("Copied to clipboard");
 		});
+
+		// Replace selection (only if there was a selection)
+		if (this.ctx && this.ctx.isSelection) {
+			const replaceSelBtn = actions.createEl("button", { text: "Replace selection" });
+			replaceSelBtn.addEventListener("click", () => {
+				this.ctx.editor.replaceSelection(this.result);
+				new obsidian.Notice("Selection replaced");
+				this.close();
+			});
+		}
+
+		// Replace entire note
+		if (this.ctx) {
+			const replaceBtn = actions.createEl("button", { text: "Replace note" });
+			replaceBtn.addEventListener("click", () => {
+				this.ctx.editor.setValue(this.result);
+				new obsidian.Notice("Note replaced");
+				this.close();
+			});
+
+			// Append to note
+			const appendBtn = actions.createEl("button", { text: "Append to note" });
+			appendBtn.addEventListener("click", () => {
+				const current = this.ctx.editor.getValue();
+				this.ctx.editor.setValue(current + "\n\n---\n\n" + this.result + "\n");
+				new obsidian.Notice("Appended to note");
+				this.close();
+			});
+		}
 	}
 
 	setError(msg) {
@@ -487,7 +518,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 		const mode = this.settings.outputMode;
 
 		if (mode === "modal") {
-			const modal = new ClaudeOutputModal(this.app, `Claude — ${taskName}`);
+			const modal = new ClaudeOutputModal(this.app, `Claude — ${taskName}`, ctx);
 			modal.open();
 
 			try {
