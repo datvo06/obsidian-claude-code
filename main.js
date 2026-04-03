@@ -1,0 +1,453 @@
+/*
+ * Claude Code - Obsidian Plugin
+ *
+ * Run Claude Code CLI on your notes from within Obsidian.
+ * Requires `claude` CLI to be installed: https://docs.anthropic.com/en/docs/claude-code
+ */
+
+const obsidian = require("obsidian");
+const { spawn } = require("child_process");
+const path = require("path");
+
+// ── Default settings ────────────────────────────────────────────────────────
+
+const DEFAULT_SETTINGS = {
+	claudePath: "claude",
+	outputMode: "modal", // "modal" | "append" | "replace-selection"
+	customTasks: [],     // user-defined tasks [{name, prompt}]
+};
+
+// ── Built-in tasks ──────────────────────────────────────────────────────────
+
+const BUILTIN_TASKS = [
+	{
+		id: "summarize",
+		name: "Summarize note",
+		prompt: "Summarize the following note concisely. Preserve key information and structure.\n\n",
+	},
+	{
+		id: "explain",
+		name: "Explain note",
+		prompt: "Explain the content of this note in plain language. Break down any complex concepts.\n\n",
+	},
+	{
+		id: "review",
+		name: "Review & suggest improvements",
+		prompt: "Review this note for clarity, accuracy, and completeness. Suggest specific improvements.\n\n",
+	},
+	{
+		id: "action-items",
+		name: "Extract action items",
+		prompt: "Extract all action items, TODOs, and next steps from this note. Return them as a markdown checklist.\n\n",
+	},
+	{
+		id: "fix-grammar",
+		name: "Fix grammar & spelling",
+		prompt: "Fix any grammar, spelling, and punctuation errors in this note. Return the corrected text only, preserving all formatting.\n\n",
+	},
+	{
+		id: "eli5",
+		name: "ELI5 (Explain like I'm 5)",
+		prompt: "Explain the content of this note as if you were explaining it to a five-year-old.\n\n",
+	},
+];
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function getActiveFileContent(app) {
+	const view = app.workspace.getActiveViewOfType(obsidian.MarkdownView);
+	if (!view) return null;
+
+	const editor = view.editor;
+	const selection = editor.getSelection();
+	return {
+		content: selection || editor.getValue(),
+		isSelection: !!selection,
+		file: view.file,
+		editor,
+	};
+}
+
+// ── Claude runner ───────────────────────────────────────────────────────────
+
+function runClaude(claudePath, prompt, cwd) {
+	return new Promise((resolve, reject) => {
+		let stdout = "";
+		let stderr = "";
+
+		// Resolve ~ in path
+		const resolved = claudePath.replace(/^~/, process.env.HOME || "");
+
+		const proc = spawn(resolved, ["-p", "--output-format", "text"], {
+			cwd,
+			env: { ...process.env, NO_COLOR: "1" },
+			shell: true,
+		});
+
+		proc.stdin.write(prompt);
+		proc.stdin.end();
+
+		proc.stdout.on("data", (chunk) => { stdout += chunk.toString(); });
+		proc.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+
+		proc.on("error", (err) => reject(new Error(`Failed to start claude: ${err.message}`)));
+
+		proc.on("close", (code) => {
+			if (code === 0) {
+				resolve(stdout.trim());
+			} else {
+				reject(new Error(stderr.trim() || `claude exited with code ${code}`));
+			}
+		});
+	});
+}
+
+// ── Output modal ────────────────────────────────────────────────────────────
+
+class ClaudeOutputModal extends obsidian.Modal {
+	constructor(app, title) {
+		super(app);
+		this.title = title;
+		this.result = "";
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.addClass("claude-code-modal");
+
+		contentEl.createEl("h2", { text: this.title });
+		this.outputEl = contentEl.createDiv({ cls: "claude-code-output" });
+		this.outputEl.createDiv({ cls: "claude-code-spinner", text: "Running claude..." });
+	}
+
+	setContent(text) {
+		this.result = text;
+		this.outputEl.empty();
+		obsidian.MarkdownRenderer.render(this.app, text, this.outputEl, "", null);
+
+		// Copy button
+		const actions = this.contentEl.createDiv({ cls: "claude-code-actions" });
+		const copyBtn = actions.createEl("button", { text: "Copy to clipboard" });
+		copyBtn.addEventListener("click", () => {
+			navigator.clipboard.writeText(this.result);
+			new obsidian.Notice("Copied to clipboard");
+		});
+	}
+
+	setError(msg) {
+		this.outputEl.empty();
+		this.outputEl.createEl("p", {
+			text: `Error: ${msg}`,
+			attr: { style: "color: var(--text-error);" },
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+// ── Custom prompt modal ─────────────────────────────────────────────────────
+
+class ClaudePromptModal extends obsidian.Modal {
+	constructor(app, onSubmit) {
+		super(app);
+		this.onSubmit = onSubmit;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.addClass("claude-code-modal");
+		contentEl.createEl("h2", { text: "Claude Code — Custom Prompt" });
+
+		contentEl.createEl("p", {
+			text: "Enter your prompt. The current note (or selection) will be appended automatically.",
+			attr: { style: "color: var(--text-muted); font-size: 0.85em;" },
+		});
+
+		const textarea = contentEl.createEl("textarea", { cls: "claude-code-prompt-input" });
+		textarea.placeholder = "e.g. Translate this to French...";
+		textarea.focus();
+
+		const actions = contentEl.createDiv({ cls: "claude-code-actions" });
+		const submitBtn = actions.createEl("button", { text: "Run", cls: "mod-cta" });
+
+		const submit = () => {
+			const value = textarea.value.trim();
+			if (value) {
+				this.close();
+				this.onSubmit(value);
+			}
+		};
+
+		submitBtn.addEventListener("click", submit);
+		textarea.addEventListener("keydown", (e) => {
+			if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+				e.preventDefault();
+				submit();
+			}
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+// ── Settings tab ────────────────────────────────────────────────────────────
+
+class ClaudeCodeSettingTab extends obsidian.PluginSettingTab {
+	constructor(app, plugin) {
+		super(app, plugin);
+		this.plugin = plugin;
+	}
+
+	display() {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		containerEl.createEl("h2", { text: "Claude Code Settings" });
+
+		new obsidian.Setting(containerEl)
+			.setName("Claude CLI path")
+			.setDesc("Path to the claude executable. Use 'claude' if it's in your PATH.")
+			.addText((text) =>
+				text
+					.setPlaceholder("claude")
+					.setValue(this.plugin.settings.claudePath)
+					.onChange(async (value) => {
+						this.plugin.settings.claudePath = value || "claude";
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new obsidian.Setting(containerEl)
+			.setName("Output mode")
+			.setDesc("Where to show Claude's response.")
+			.addDropdown((dropdown) =>
+				dropdown
+					.addOption("modal", "Show in modal")
+					.addOption("append", "Append to note")
+					.addOption("replace-selection", "Replace selection")
+					.setValue(this.plugin.settings.outputMode)
+					.onChange(async (value) => {
+						this.plugin.settings.outputMode = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		// ── Custom tasks ──
+		containerEl.createEl("h3", { text: "Custom Tasks" });
+		containerEl.createEl("p", {
+			text: "Define reusable prompts that show up in the command palette.",
+			attr: { style: "color: var(--text-muted); font-size: 0.85em; margin-top: -0.5em;" },
+		});
+
+		const tasksContainer = containerEl.createDiv();
+		this.renderCustomTasks(tasksContainer);
+	}
+
+	renderCustomTasks(container) {
+		container.empty();
+
+		this.plugin.settings.customTasks.forEach((task, index) => {
+			const s = new obsidian.Setting(container)
+				.setName(task.name || "(unnamed)")
+				.setDesc(task.prompt.substring(0, 80) + (task.prompt.length > 80 ? "…" : ""));
+
+			s.addButton((btn) =>
+				btn.setButtonText("Edit").onClick(() => {
+					const modal = new CustomTaskEditModal(this.app, task, async (updated) => {
+						this.plugin.settings.customTasks[index] = updated;
+						await this.plugin.saveSettings();
+						this.plugin.registerCustomTaskCommands();
+						this.renderCustomTasks(container);
+					});
+					modal.open();
+				})
+			);
+
+			s.addButton((btn) =>
+				btn
+					.setButtonText("Delete")
+					.setWarning()
+					.onClick(async () => {
+						this.plugin.settings.customTasks.splice(index, 1);
+						await this.plugin.saveSettings();
+						this.plugin.registerCustomTaskCommands();
+						this.renderCustomTasks(container);
+					})
+			);
+		});
+
+		new obsidian.Setting(container).addButton((btn) =>
+			btn.setButtonText("Add task").setCta().onClick(() => {
+				const modal = new CustomTaskEditModal(this.app, { name: "", prompt: "" }, async (task) => {
+					this.plugin.settings.customTasks.push(task);
+					await this.plugin.saveSettings();
+					this.plugin.registerCustomTaskCommands();
+					this.renderCustomTasks(container);
+				});
+				modal.open();
+			})
+		);
+	}
+}
+
+// ── Custom task editor modal ────────────────────────────────────────────────
+
+class CustomTaskEditModal extends obsidian.Modal {
+	constructor(app, task, onSave) {
+		super(app);
+		this.task = { ...task };
+		this.onSave = onSave;
+	}
+
+	onOpen() {
+		const { contentEl } = this;
+		contentEl.createEl("h2", { text: "Edit Custom Task" });
+
+		new obsidian.Setting(contentEl)
+			.setName("Name")
+			.setDesc("Shows in the command palette.")
+			.addText((t) =>
+				t.setValue(this.task.name).onChange((v) => (this.task.name = v))
+			);
+
+		contentEl.createEl("label", { text: "Prompt", attr: { style: "font-weight: 600;" } });
+		const textarea = contentEl.createEl("textarea", { cls: "claude-code-prompt-input" });
+		textarea.value = this.task.prompt;
+		textarea.addEventListener("input", () => (this.task.prompt = textarea.value));
+
+		const actions = contentEl.createDiv({ cls: "claude-code-actions" });
+		actions.createEl("button", { text: "Save", cls: "mod-cta" }).addEventListener("click", () => {
+			if (this.task.name.trim() && this.task.prompt.trim()) {
+				this.close();
+				this.onSave(this.task);
+			} else {
+				new obsidian.Notice("Both name and prompt are required.");
+			}
+		});
+	}
+
+	onClose() {
+		this.contentEl.empty();
+	}
+}
+
+// ── Main plugin ─────────────────────────────────────────────────────────────
+
+class ClaudeCodePlugin extends obsidian.Plugin {
+	async onload() {
+		await this.loadSettings();
+		this.customCommandIds = [];
+
+		// Register built-in task commands
+		for (const task of BUILTIN_TASKS) {
+			this.addCommand({
+				id: `claude-${task.id}`,
+				name: task.name,
+				editorCallback: () => this.runTask(task.prompt, task.name),
+			});
+		}
+
+		// Custom prompt command
+		this.addCommand({
+			id: "claude-custom-prompt",
+			name: "Custom prompt…",
+			editorCallback: () => {
+				new ClaudePromptModal(this.app, (prompt) => {
+					this.runTask(prompt + "\n\n", "Custom prompt");
+				}).open();
+			},
+		});
+
+		// Register user-defined task commands
+		this.registerCustomTaskCommands();
+
+		// Settings tab
+		this.addSettingTab(new ClaudeCodeSettingTab(this.app, this));
+
+		console.log("Claude Code plugin loaded");
+	}
+
+	onunload() {
+		console.log("Claude Code plugin unloaded");
+	}
+
+	async loadSettings() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+
+	async saveSettings() {
+		await this.saveData(this.settings);
+	}
+
+	registerCustomTaskCommands() {
+		// Unload old custom commands — Obsidian doesn't expose a clean
+		// removeCommand API, so we track IDs and skip duplicates.
+		// Commands persist until the plugin is reloaded, but that's fine
+		// because we use stable IDs derived from the task name.
+		this.customCommandIds = [];
+
+		for (const task of this.settings.customTasks) {
+			const id = `claude-custom-${task.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;
+			if (this.customCommandIds.includes(id)) continue;
+
+			this.addCommand({
+				id,
+				name: `Custom: ${task.name}`,
+				editorCallback: () => this.runTask(task.prompt + "\n\n", task.name),
+			});
+			this.customCommandIds.push(id);
+		}
+	}
+
+	async runTask(promptPrefix, taskName) {
+		const ctx = getActiveFileContent(this.app);
+		if (!ctx) {
+			new obsidian.Notice("Open a markdown file first.");
+			return;
+		}
+
+		const fullPrompt = promptPrefix + ctx.content;
+		const vaultPath = this.app.vault.adapter.basePath;
+
+		// Decide how to output
+		const mode = this.settings.outputMode;
+
+		if (mode === "modal") {
+			const modal = new ClaudeOutputModal(this.app, `Claude — ${taskName}`);
+			modal.open();
+
+			try {
+				const result = await runClaude(this.settings.claudePath, fullPrompt, vaultPath);
+				modal.setContent(result);
+			} catch (err) {
+				modal.setError(err.message);
+			}
+		} else {
+			new obsidian.Notice(`Running Claude: ${taskName}…`);
+
+			try {
+				const result = await runClaude(this.settings.claudePath, fullPrompt, vaultPath);
+
+				if (mode === "replace-selection" && ctx.isSelection) {
+					ctx.editor.replaceSelection(result);
+				} else {
+					// Append
+					const current = ctx.editor.getValue();
+					const separator = "\n\n---\n\n";
+					const header = `## Claude — ${taskName}\n\n`;
+					ctx.editor.setValue(current + separator + header + result + "\n");
+				}
+
+				new obsidian.Notice("Claude finished.");
+			} catch (err) {
+				new obsidian.Notice(`Claude error: ${err.message}`);
+			}
+		}
+	}
+}
+
+module.exports = ClaudeCodePlugin;

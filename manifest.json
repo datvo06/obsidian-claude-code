@@ -1,0 +1,10 @@
+{
+	"id": "claude-code",
+	"name": "Claude Code",
+	"version": "1.0.0",
+	"minAppVersion": "0.15.0",
+	"description": "Run Claude Code CLI tasks on your notes directly from Obsidian.",
+	"author": "datvo06",
+	"authorUrl": "https://github.com/datvo06",
+	"isDesktopOnly": true
+}
