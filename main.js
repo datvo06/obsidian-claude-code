@@ -61,9 +61,17 @@ function findClaudeBinary() {
 
 const DEFAULT_SETTINGS = {
 	claudePath: "",      // empty = auto-detect
+	model: "",           // empty = CLI default
 	outputMode: "modal", // "modal" | "append" | "replace-selection"
 	customTasks: [],     // user-defined tasks [{name, prompt}]
 };
+
+const MODELS = [
+	{ value: "",                            label: "Default (CLI default)" },
+	{ value: "claude-opus-4-6",             label: "Claude Opus 4.6" },
+	{ value: "claude-sonnet-4-6",           label: "Claude Sonnet 4.6" },
+	{ value: "claude-haiku-4-5-20251001",   label: "Claude Haiku 4.5" },
+];
 
 // ── Built-in tasks ──────────────────────────────────────────────────────────
 
@@ -132,7 +140,7 @@ function resolvePath(claudePath) {
 	return detected;
 }
 
-function runClaude(claudePath, prompt, cwd) {
+function runClaude(claudePath, model, prompt, cwd) {
 	return new Promise((resolve, reject) => {
 		let stdout = "";
 		let stderr = "";
@@ -144,7 +152,10 @@ function runClaude(claudePath, prompt, cwd) {
 			return reject(err);
 		}
 
-		const proc = spawn(resolved, ["-p", "--output-format", "text"], {
+		const args = ["-p", "--output-format", "text"];
+		if (model) args.push("--model", model);
+
+		const proc = spawn(resolved, args, {
 			cwd,
 			env: { ...process.env, NO_COLOR: "1" },
 		});
@@ -321,6 +332,19 @@ class ClaudeCodeSettingTab extends obsidian.PluginSettingTab {
 						await this.plugin.saveSettings();
 					})
 			);
+
+		new obsidian.Setting(containerEl)
+			.setName("Model")
+			.setDesc("Which Claude model to use.")
+			.addDropdown((dropdown) => {
+				for (const m of MODELS) dropdown.addOption(m.value, m.label);
+				dropdown
+					.setValue(this.plugin.settings.model)
+					.onChange(async (value) => {
+						this.plugin.settings.model = value;
+						await this.plugin.saveSettings();
+					});
+			});
 
 		new obsidian.Setting(containerEl)
 			.setName("Output mode")
@@ -524,7 +548,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			modal.open();
 
 			try {
-				const result = await runClaude(this.settings.claudePath, fullPrompt, vaultPath);
+				const result = await runClaude(this.settings.claudePath, this.settings.model, fullPrompt, vaultPath);
 				modal.setContent(result);
 			} catch (err) {
 				modal.setError(err.message);
@@ -533,7 +557,7 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			new obsidian.Notice(`Running Claude: ${taskName}…`);
 
 			try {
-				const result = await runClaude(this.settings.claudePath, fullPrompt, vaultPath);
+				const result = await runClaude(this.settings.claudePath, this.settings.model, fullPrompt, vaultPath);
 
 				if (mode === "replace-selection" && ctx.isSelection) {
 					ctx.editor.replaceSelection(result);
