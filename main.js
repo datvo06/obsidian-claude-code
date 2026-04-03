@@ -511,7 +511,9 @@ class ClaudeCodePlugin extends obsidian.Plugin {
 			return;
 		}
 
-		const fullPrompt = promptPrefix + ctx.content;
+		const filePath = ctx.file ? ctx.file.path : "unknown";
+		const fileHeader = `File: ${filePath}\nVault: ${this.app.vault.getName()}\n\n`;
+		const fullPrompt = fileHeader + promptPrefix + ctx.content;
 		const vaultPath = this.app.vault.adapter.basePath;
 
 		// Decide how to output
