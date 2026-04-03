@@ -152,7 +152,7 @@ function runClaude(claudePath, model, prompt, cwd) {
 			return reject(err);
 		}
 
-		const args = ["-p", "--output-format", "text"];
+		const args = ["-p", "--output-format", "text", "--tools", ""];
 		if (model) args.push("--model", model);
 
 		const proc = spawn(resolved, args, {
